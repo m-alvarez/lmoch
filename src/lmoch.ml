@@ -71,8 +71,11 @@ let () =
     if !type_only then exit 0;
     if main_node = "" then exit 0;
     let node = List.find (fun {Typed_ast.tn_name} -> tn_name.Ident.name = main_node) ft in
-    Verifier.verify node;
-
+    Format.printf "The property of node %s %s"
+		  main_node
+		  (match Verifier.verify ft node with
+		   | Holds -> "holds"
+		   | Does_not_hold _ -> "does not hold");
     exit 0
   with
     | Lexical_error s ->
