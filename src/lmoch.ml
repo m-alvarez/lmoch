@@ -71,7 +71,7 @@ let () =
     if !type_only then exit 0;
     if main_node = "" then exit 0;
     let node = List.find (fun {Typed_ast.tn_name} -> tn_name.Ident.name = main_node) ft in
-    Format.printf "The property of node %s %s"
+    Format.printf "The property of node %s %s\n"
 		  main_node
 		  (match Verifier.verify ft node with
 		   | Holds -> "holds"

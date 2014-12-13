@@ -7,14 +7,41 @@ open Smt
 module F = Formula
 module T = Term
 
+module Remember = struct
+    module Int = struct
+        type t = int
+        let compare = Pervasives.compare
+    end
+    module Map = Map.Make(Int)
+
+    let count = ref 0
+    let formulae = ref Map.empty
+
+    let reset () = begin
+        count := 0;
+        formulae := Map.empty
+    end 
+
+    let id_for formula = begin
+        let id = !count in
+        formulae := Map.add id formula !formulae;
+        incr count;
+        id
+    end 
+
+    let formula_of id =
+        Map.find id !formulae
+end 
+
 type result = Holds | Does_not_hold of F.t
 
-let fresh ?(prefix="aux") () =
+let fresh =
   let r = ref 0 in
-  let fresh prefix () =
+  let fresh ?(prefix="aux") () =
     r := !r + 1; prefix ^ string_of_int !r
   in
-  fresh prefix ()
+  fresh
+
 
 let declare name ?(input=[Type.type_int]) ~output =
   let name = Hstring.make name in
@@ -132,11 +159,6 @@ let declare_typed_variable ~prefix ({name}, ty) =
   declare name (as_smt_type ty);
   name
 
-let declare_fresh_variable ({name}, ty) =
-  let name = fresh ~prefix:name () in
-  declare name (as_smt_type ty);
-  name
-
 let rec expression_to_formula nodes prefix time ({texpr_desc} as exp) =
   match texpr_desc with
   | TE_const (Cbool b) ->
@@ -205,7 +227,7 @@ and expression_to_terms nodes prefix time ({texpr_desc} as exp) =
      let terms, equations = expression_to_terms nodes prefix (time -- (t_int 1)) e in
      let equations = ref equations in
      List.map (fun term ->
-	       let name = fresh () in
+	       let name = fresh ~prefix:"pre" () in
 	       let typ = match term with
 		 | t when Term.is_int t -> Type.type_int
 		 | t when Term.is_real t -> Type.type_real
@@ -294,7 +316,7 @@ let verify nodes ({tn_input; tn_output; tn_local; tn_equs} as node) =
 	  let formulae = node_to_formulae nodes "" (t_int i) node in
 	  List.iter (fun f ->
 		     report "assume" f;
-		     Base_solver.assume ~id:0 f)
+		     Base_solver.assume ~id:(Remember.id_for f) f)
 		    formulae
 	done;
 	Base_solver.check ();
@@ -303,7 +325,7 @@ let verify nodes ({tn_input; tn_output; tn_local; tn_equs} as node) =
 	for i = 0 to depth - 1 do
 	  let equation = (variable @@@ [t_int i]) === T.t_true in
 	  report "check" equation;
-	  if not (Base_solver.entails ~id:0 equation)
+	  if not (Base_solver.entails ~id:(Remember.id_for equation) equation)
 	  then raise (Does_not_hold equation)
 	done;
 	print_endline "The base case holds!"
@@ -319,21 +341,32 @@ let verify nodes ({tn_input; tn_output; tn_local; tn_equs} as node) =
 	  let formulae = node_to_formulae nodes "" instant node in
 	  List.iter (fun f ->
 		     report "assume" f;
-		     Inductive_solver.assume ~id:0 f)
+		     Inductive_solver.assume ~id:(Remember.id_for f) f)
 		    formulae;
 
 	  if i < depth 
-	  then Inductive_solver.assume ~id:0 ( instant >>> t_int 0 );
+      then Inductive_solver.assume ~id:(Remember.id_for (instant >>> t_int 0)) ( instant >>> t_int 0 );
 
 	  if i > 0
 	  then begin
 	      let equation = (variable @@@ [instant]) === T.t_true in
 	      Format.printf "ASSUMING INDUCTIVE HYPOTHESIS\n";
 	      report "assume" equation;
-	      Inductive_solver.assume ~id:0 ((variable @@@ [instant]) === T.t_true);
+	      Inductive_solver.assume ~id:(Remember.id_for equation) ((variable @@@ [instant]) === T.t_true);
 	    end
 	done;
-	Inductive_solver.check ();
+    try
+        Inductive_solver.check ();
+    with Smt.Unsat(ids) -> begin
+        Format.printf "Unsatisfiable hypotheses\n";
+        List.iter (fun id -> 
+            F.print Format.std_formatter (Remember.formula_of id);
+            print_newline ())
+        ids;
+        Format.printf "\n";
+        let _ = read_line () in
+        raise (Failure "Unsatisfiable hypotheses")
+    end;
 
 	Format.printf "Checking inductive case condition\n";
 	let formula = (variable @@@ [n @@@ []] === T.t_true) in
