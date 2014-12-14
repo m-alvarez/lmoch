@@ -16,6 +16,7 @@ let norm_only = ref false
 let lucy_printer = ref false
 let ocaml_printer = ref true
 let verbose = ref false
+let max_depth = ref None
 
 let spec =
   ["-parse-only", Arg.Set parse_only, "  stops after parsing";
@@ -23,6 +24,7 @@ let spec =
    "-norm-only", Arg.Set norm_only, "  stops after normalization";
    "-verbose", Arg.Set verbose, "print intermediate transformations";
    "-v", Arg.Set verbose, "print intermediate transformations";
+   "-max-depth", Arg.Int (fun i -> max_depth := Some i), " max depth of the k-indection procedure; default is 5";
   ]
 
 let file, main_node =
@@ -73,7 +75,7 @@ let () =
     let node = List.find (fun {Typed_ast.tn_name} -> tn_name.Ident.name = main_node) ft in
     Format.printf "The property of node %s %s\n"
 		  main_node
-		  (match Verifier.verify ft node with
+		  (match Verifier.verify ?max_depth:(!max_depth) ft node with
 		   | `Property_holds             -> "is TRUE"
 		   | `Property_is_false          -> "is FALSE"
            | `Induction_depth_exceeded i -> "could not be proven or disproven at depth " ^ (string_of_int i));
