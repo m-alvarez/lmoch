@@ -32,7 +32,14 @@ let verify_at_depth depth nodes ({tn_input; tn_output; tn_local; tn_equs} as nod
         done;
         (try
             Base_solver.check ();
-         with Smt.Unsat _ ->
+         with Smt.Unsat ids ->
+             Format.eprintf "The base case contains inconsistencies\n";
+             Format.eprintf "The following formulae are inconsistent:\n";
+             List.iteri (fun i id ->
+                 Format.eprintf "%d\t" (i + 1);
+                 Formula.print Format.err_formatter (Remember.formula_of id);
+                 Format.eprintf "\n";
+             ) ids;
              raise Base_case_fails);
         
         Format.printf "Checking base case condition\n";

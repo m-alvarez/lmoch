@@ -75,6 +75,9 @@ let f_bool b =
   if b
   then F.f_true
   else F.f_false
+
+let f_not f =
+    F.make F.Not [f]
 				 
 let t_bool b =
   if b
@@ -241,6 +244,8 @@ and expression_to_terms nodes prefix ({texpr_desc} as exp) =
          let cond, cnd_eq = f_cond time  in
          let thn, thn_eq = f_thn time in
          let els, els_eq = f_els time in
+         let thn_eq = List.map (fun eq -> (cond => eq)) thn_eq in
+         let els_eq = List.map (fun eq -> ((f_not cond) => eq)) els_eq in
          List.map2 (ite cond) thn els, cnd_eq @ thn_eq @ els_eq 
   | TE_op (op, exprs) when is_arith op ->
      let results = List.map (expression_to_terms nodes prefix) exprs in
