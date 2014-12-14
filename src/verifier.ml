@@ -33,8 +33,6 @@ module Remember = struct
         Map.find id !formulae
 end 
 
-type result = Holds | Does_not_hold of F.t
-
 let fresh =
   let r = ref 0 in
   let fresh ?(prefix="aux") () =
@@ -146,6 +144,9 @@ let (!!) cond =
 let (>>>) a b =
   F.make_lit F.Lt [b; a]
 
+let (>>=) a b =
+    F.make_lit F.Le [b; a]
+
 let split l =
   List.map fst l, List.map snd l
   
@@ -158,6 +159,25 @@ let declare_typed_variable ~prefix ({name}, ty) =
   let name = prefix ^ name in
   declare name (as_smt_type ty);
   name
+
+let rec collect_arrows exp =
+    match exp.texpr_desc with
+    | TE_arrow (e1, e2) ->
+        let arr, body = collect_arrows e2 in
+        e1 :: arr, body
+    | _ -> [], exp
+
+let f_or formulae =
+    match formulae with
+    | []  -> F.f_false
+    | [f] -> f
+    | l   -> F.make F.Or l
+
+let f_and formulae =
+    match formulae with
+    | []  -> F.f_true
+    | [f] -> f
+    | l   -> F.make F.And l
 
 let rec expression_to_formula nodes prefix ({texpr_desc} as exp) ~time =
   match texpr_desc with
@@ -177,12 +197,21 @@ let rec expression_to_formula nodes prefix ({texpr_desc} as exp) ~time =
      let exprs, eqs = split @@ List.map (expression_to_terms nodes prefix ~time:time) exprs in
      f_compare op (List.map List.hd exprs), List.concat eqs
   | TE_arrow (head, tail) ->
-     let head, he = expression_to_formula nodes prefix head (t_int 0) in
-     let tail, te = expression_to_formula nodes prefix tail time in
-     (time === (t_int 0) &&& head) ||| ( (time >>> (t_int 0)) &&& tail), he @ te
+     let initials, body = collect_arrows exp in
+     let equations = ref [] in
+     let conds = List.mapi (fun i expr ->
+         let f, eqs = expression_to_formula nodes prefix expr (t_int 0) in
+         equations := eqs @ !equations;
+         (time === (t_int i)) &&& f)
+         initials
+     in
+     let body, eqs = expression_to_formula nodes prefix body time in
+     f_or ((time >>> (t_int (List.length conds))) :: conds), eqs @ !equations
+
   | TE_pre f ->
-     let f, fe = expression_to_formula nodes prefix f (time -- (t_int 1)) in
+     let f, fe = expression_to_formula nodes prefix f (time (*-- (t_int 1*)) in
      (time >>> (t_int 0)) => f, fe
+
   | _ ->
      Typed_ast_printer.print_exp Format.std_formatter exp;
      Format.fprintf Format.std_formatter "%!";
@@ -231,14 +260,22 @@ and expression_to_terms nodes prefix ({texpr_desc} as exp) =
          declare name Type.type_bool;
          let formula, eqs = f_formula time in
          [name @@@ [time]], (((name @@@ [time]) === (t_bool true)) <=> formula) :: eqs
+
   | TE_arrow (e1, e2) ->
-     let f_head = expression_to_terms nodes prefix e1 in
-     let f_tail = expression_to_terms nodes prefix e2 in
+     let initial, body = collect_arrows exp in
+     let f_initial = List.map (expression_to_terms nodes prefix) initial in
+     let f_body = expression_to_terms nodes prefix body in
      fun ~time ->
-     let head, head_eqs = f_head ~time:(t_int 0) in
-     let tail, tail_eqs = f_tail ~time:time in
-     let cond = time === (t_int 0) in
-     List.map2 (ite cond) head tail, head_eqs @ tail_eqs
+         let initial_terms, initial_eqs = split
+            (List.mapi (fun i f -> f ~time:(t_int i)) f_initial)
+         in 
+         let body_term, body_eqs = f_body ~time:time in
+         let term = ref (List.hd initial_terms) in
+         List.iteri (fun i elt ->
+             term := List.map2 (ite (time === (t_int i))) !term elt)
+             (List.tl initial_terms);
+         List.map2 (ite (time >>= (t_int @@ List.length initial_terms))) body_term !term
+         , List.concat (body_eqs :: initial_eqs)
 
   | TE_pre e ->
      let f_terms = expression_to_terms nodes prefix e in
@@ -317,18 +354,15 @@ let declare_variables {tn_input; tn_output; tn_local; tn_equs} =
   let variables = tn_input @ tn_output @ tn_local in
   List.iter (fun ({name}, t) -> declare name (as_smt_type t)) variables
 	     
-let depth nodes node =
-  1
+exception Property_does_not_hold
+exception Base_case_fails
 
-exception Does_not_hold of Formula.t
-
-let verify nodes ({tn_input; tn_output; tn_local; tn_equs} as node) =
+let verify_at_depth depth nodes ({tn_input; tn_output; tn_local; tn_equs} as node) =
   try
     declare_variables node;
     let {name = variable}, _ =
       List.find (fun ({name}, _) -> String.lowercase name = "ok") tn_output
     in
-    let depth = depth nodes node in
 
     let report str f =
       Format.printf "%s " str;
@@ -346,14 +380,17 @@ let verify nodes ({tn_input; tn_output; tn_local; tn_equs} as node) =
                  Base_solver.assume ~id:(Remember.id_for f) f)
                 formulae
         done;
-        Base_solver.check ();
+        (try
+            Base_solver.check ();
+         with Smt.Unsat _ ->
+             raise Base_case_fails);
         
         Format.printf "Checking base case condition\n";
         for i = 0 to depth - 1 do
           let equation = (variable @@@ [t_int i]) === T.t_true in
           report "check" equation;
           if not (Base_solver.entails ~id:(Remember.id_for equation) equation)
-          then raise (Does_not_hold equation)
+          then (F.print Format.std_formatter equation; raise Base_case_fails)
         done;
         print_endline "The base case holds!"
     end;
@@ -381,7 +418,26 @@ let verify nodes ({tn_input; tn_output; tn_local; tn_equs} as node) =
               Format.printf "ASSUMING INDUCTIVE HYPOTHESIS\n";
               report "assume" equation;
               Inductive_solver.assume ~id:(Remember.id_for equation) ((variable @@@ [instant]) === T.t_true);
-            end
+          end;
+
+          let t_i = fresh () in
+          let t_j = fresh () in
+          declare t_i ~input:[] ~output:Type.type_int;
+          declare t_j ~input:[] ~output:Type.type_int;
+          let left = (F.make_lit F.Lt [t_i @@@ []; t_j @@@ []]) 
+              &&& (F.make_lit F.Le [t_j @@@ []; n @@@ []])
+          in
+          let equation =
+            match
+                (List.map (fun ({name=var},_) -> 
+                    (var @@@ [t_i @@@ []]) =/= (var @@@ [t_j @@@ []]))
+                    (tn_input @ tn_local)  )
+            with
+            | []  -> F.f_false
+            | [e] -> left => e 
+            | es  -> left => (F.make F.Or es)
+          in
+          Inductive_solver.assume ~id:(Remember.id_for equation) equation;
         done;
         (try
             Inductive_solver.check ();
@@ -392,32 +448,38 @@ let verify nodes ({tn_input; tn_output; tn_local; tn_equs} as node) =
                 print_newline ())
             ids;
             Format.printf "\n";
-            raise (Failure "Unsatisfiable hypotheses")
-        end);
+            raise (Failure "Unsatisfiable hypotheses: this should not happen")
+          end);
 
         Format.printf "Checking inductive case condition\n";
         let formula = (variable @@@ [n @@@ []] === T.t_true) in
         report "check" formula;
-        if not (Inductive_solver.entails ~id:0 ((variable @@@ [n @@@ []] === T.t_true)))
-        then raise (Does_not_hold formula);
+        (if not (Inductive_solver.entails ~id:0 ((variable @@@ [n @@@ []] === T.t_true)))
+        then raise Property_does_not_hold);
         print_endline "The inductive case holds!"
     end;
 
-    Holds
+    `Property_holds
+
   with
-  | Does_not_hold f ->
-     Formula.print Format.err_formatter f;
-     Format.fprintf Format.err_formatter "\n";
-     Does_not_hold f
-  | Smt.Error(DuplicateSymb _) ->
-          Format.printf "Lol duplicate";
-          failwith "lol"
-  | Smt.Error(UnknownSymb _) ->
-          Format.printf "Lol unknown";
-          failwith "lol"
-  | Smt.Error(UnknownType t) ->
-          Format.printf "Top kek %s" (Hstring.view t);
-          failwith "kek"
-  | Smt.Error(DuplicateTypeName t) ->
-          Format.printf "Top lel %s" (Hstring.view t);
-          failwith "lel"
+  | Property_does_not_hold ->
+     `Property_does_not_hold
+  | Base_case_fails ->
+     `Base_case_fails
+
+let verify ?(max_depth = 5) nodes node =
+    let depth = ref 1 in
+    let result = ref None in
+    while !result = None do
+        if !depth > max_depth
+        then result := Some (`Induction_depth_exceeded max_depth)
+        else match verify_at_depth !depth nodes node with
+        | `Base_case_fails        -> result := Some `Property_is_false
+        | `Property_holds         -> result := Some `Property_holds
+        | `Property_does_not_hold -> ();
+        incr depth
+    done;
+    match !result with
+    | Some t -> t
+    | None -> failwith "The impossible happened"
+

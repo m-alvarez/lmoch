@@ -1,0 +1,4 @@
+node check(clk: bool) returns (ok: bool);
+let
+    ok = 1 = 1;
+tel

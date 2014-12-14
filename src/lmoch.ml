@@ -74,8 +74,9 @@ let () =
     Format.printf "The property of node %s %s\n"
 		  main_node
 		  (match Verifier.verify ft node with
-		   | Holds -> "holds"
-		   | Does_not_hold _ -> "does not hold");
+		   | `Property_holds             -> "is TRUE"
+		   | `Property_is_false          -> "is FALSE"
+           | `Induction_depth_exceeded i -> "could not be proven or disproven at depth " ^ (string_of_int i));
     exit 0
   with
     | Lexical_error s ->

@@ -1,0 +1,6 @@
+node check(input : bool) returns (ok : bool);
+var foo : int;
+let
+    foo = 1;
+    ok = true -> true -> (pre (pre ok));
+tel
