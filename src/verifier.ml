@@ -42,9 +42,9 @@ let fresh =
   in
   fresh
 
-
 let declare name ?(input=[Type.type_int]) ~output =
   let name = Hstring.make name in
+  (* Unfortunately this causes rubbish to be printed to stderr *)
   if not (Symbol.declared name)
   then Symbol.declare name input output
 
@@ -159,79 +159,98 @@ let declare_typed_variable ~prefix ({name}, ty) =
   declare name (as_smt_type ty);
   name
 
-let rec expression_to_formula nodes prefix time ({texpr_desc} as exp) =
+let rec expression_to_formula nodes prefix ({texpr_desc} as exp) ~time =
   match texpr_desc with
   | TE_const (Cbool b) ->
      f_bool b, []
   | TE_ident {name} ->
      ((prefix ^ name) @@@ [time]) === (t_bool true), []
   | TE_op (Op_if, [cond; thn; els]) ->
-     let cond, ec = expression_to_formula nodes prefix time cond in
-     let f1, e1 = expression_to_formula nodes prefix time thn in
-     let f2, e2 = expression_to_formula nodes prefix time els in
+     let cond, ec = expression_to_formula nodes prefix cond time in
+     let f1, e1 = expression_to_formula nodes prefix thn time in
+     let f2, e2 = expression_to_formula nodes prefix els time in
      (cond &&& f1) ||| ((!!cond) &&& f2), (ec @ e1 @ e2)
   | TE_op (op, exprs) when is_logic op ->
-     let exprs, eqs = split @@ List.map (expression_to_formula nodes prefix time) exprs in
+     let exprs, eqs = split @@ List.map (expression_to_formula nodes prefix ~time:time) exprs in
      f_operation op exprs, List.concat eqs
   | TE_op (op, exprs) when is_comparison op ->
-     let exprs, eqs = split @@ List.map (expression_to_terms nodes prefix time) exprs in
+     let exprs, eqs = split @@ List.map (expression_to_terms nodes prefix ~time:time) exprs in
      f_compare op (List.map List.hd exprs), List.concat eqs
   | TE_arrow (head, tail) ->
-     let head, he = expression_to_formula nodes prefix (t_int 0) head in
-     let tail, te = expression_to_formula nodes prefix time tail in
+     let head, he = expression_to_formula nodes prefix head (t_int 0) in
+     let tail, te = expression_to_formula nodes prefix tail time in
      (time === (t_int 0) &&& head) ||| ( (time >>> (t_int 0)) &&& tail), he @ te
   | TE_pre f ->
-     let f, fe = expression_to_formula nodes prefix (time -- (t_int 1)) f in
+     let f, fe = expression_to_formula nodes prefix f (time -- (t_int 1)) in
      (time >>> (t_int 0)) => f, fe
   | _ ->
      Typed_ast_printer.print_exp Format.std_formatter exp;
      Format.fprintf Format.std_formatter "%!";
      failwith "failure"
-and expression_to_terms nodes prefix time ({texpr_desc} as exp) =
+and expression_to_terms nodes prefix ({texpr_desc} as exp) =
   match texpr_desc with
   | TE_const (Cint i) ->
+     fun ~time ->
      [t_int i], []
   | TE_const (Cbool b) ->
+     fun ~time ->
      [t_bool b], []
   | TE_const (Creal r) ->
+     fun ~time ->
      failwith "We can't handle reals yet"
   | TE_ident {name} ->
+     fun ~time ->
      [(prefix ^ name) @@@ [time]], []
   | TE_op (Op_if, [cond; thn; els]) ->
-     let cond, cnd_eq = expression_to_formula nodes prefix time cond in
-     let thn, thn_eq = expression_to_terms nodes prefix time thn in
-     let els, els_eq = expression_to_terms nodes prefix time els in
-     List.map2 (ite cond) thn els, cnd_eq @ thn_eq @ els_eq 
+     let f_cond = expression_to_formula nodes prefix cond in
+     let f_thn = expression_to_terms nodes prefix thn in
+     let f_els = expression_to_terms nodes prefix els in
+     fun ~time ->
+         let cond, cnd_eq = f_cond time  in
+         let thn, thn_eq = f_thn time in
+         let els, els_eq = f_els time in
+         List.map2 (ite cond) thn els, cnd_eq @ thn_eq @ els_eq 
   | TE_op (op, exprs) when is_arith op ->
-     let results = List.map (expression_to_terms nodes prefix time) exprs in
-     let exprs = List.map List.hd (List.map fst results) in
-     let eqs = List.concat (List.map snd results) in
-     [t_operation op exprs], eqs 
+     let results = List.map (expression_to_terms nodes prefix) exprs in
+     fun ~time ->
+         let results = List.map (fun f -> f ~time:time) results in
+         let exprs = List.map List.hd (List.map fst results) in
+         let eqs = List.concat (List.map snd results) in
+         [t_operation op exprs], eqs 
   | TE_op (op, exprs) when is_logic op ->
-     let name = fresh () in
-     declare name Type.type_bool;
-     let formula, eqs = expression_to_formula nodes prefix time exp in
-     [ name @@@ [time] ], ((name @@@ [time] === (t_bool true)) <=> formula) :: eqs
+     let f_formula = expression_to_formula nodes prefix exp in
+     fun ~time ->
+         let name = fresh () in
+         declare name Type.type_bool;
+         let formula, eqs = f_formula time in
+         [ name @@@ [time] ], ((name @@@ [time] === (t_bool true)) <=> formula) :: eqs
   | TE_op (op, [e1; e2]) when is_comparison op ->
-     let name = fresh () in
-     declare name Type.type_bool;
-     let formula, eqs = expression_to_formula nodes prefix time exp in
-     [name @@@ [time]], (((name @@@ [time]) === (t_bool true)) <=> formula) :: eqs
+     let f_formula = expression_to_formula nodes prefix exp in
+     fun ~time ->
+         let name = fresh () in
+         declare name Type.type_bool;
+         let formula, eqs = f_formula time in
+         [name @@@ [time]], (((name @@@ [time]) === (t_bool true)) <=> formula) :: eqs
   | TE_arrow (e1, e2) ->
-     let head, head_eqs = expression_to_terms nodes prefix (t_int 0) e1 in
-     let tail, tail_eqs = expression_to_terms nodes prefix time e2 in
+     let f_head = expression_to_terms nodes prefix e1 in
+     let f_tail = expression_to_terms nodes prefix e2 in
+     fun ~time ->
+     let head, head_eqs = f_head ~time:(t_int 0) in
+     let tail, tail_eqs = f_tail ~time:time in
      let cond = time === (t_int 0) in
      List.map2 (ite cond) head tail, head_eqs @ tail_eqs
 
   | TE_pre e ->
-     let terms, equations = expression_to_terms nodes prefix (time -- (t_int 1)) e in
+     let f_terms = expression_to_terms nodes prefix e in
+     fun ~time ->
+     let terms, equations = f_terms (time -- (t_int 1)) in
      let equations = ref equations in
      List.map (fun term ->
 	       let name = fresh ~prefix:"pre" () in
 	       let typ = match term with
-		 | t when Term.is_int t -> Type.type_int
-		 | t when Term.is_real t -> Type.type_real
-		 | t -> Type.type_bool
+             | t when Term.is_int t -> Type.type_int
+             | t when Term.is_real t -> Type.type_real
+             | t -> Type.type_bool
 	       in
 	       declare name typ;
 	       equations := (time >>> (t_int 0) => (name @@@ [time] === term)) :: !equations;
@@ -240,52 +259,59 @@ and expression_to_terms nodes prefix time ({texpr_desc} as exp) =
      , !equations
 
   | TE_tuple exprs ->
-     let results = List.map (expression_to_terms nodes prefix time) exprs in
-     let terms = List.concat @@ List.map fst results in
-     let eqs = List.concat @@ List.map snd results in
-     terms, eqs
+     let f_results = List.map (expression_to_terms nodes prefix) exprs in
+     fun ~time ->
+         let results = List.map (fun f -> f ~time:time) f_results in
+         let terms = List.concat @@ List.map fst results in
+         let eqs = List.concat @@ List.map snd results in
+         terms, eqs
 
   | TE_app ({name}, args) ->
-     begin
-       try
-	 let node = List.find (fun {tn_name={name=name'}} -> name = name') nodes in
-	 let args, arg_eqs = split (List.map (expression_to_terms nodes prefix time) args) in
 	 let new_prefix = fresh ~prefix:"call#" () in
-	 (* We crash if one of the arguments is a tuple, just in case *)
-	 let args = List.map (function [arg] -> arg | _ -> failwith "Tuple in argument position") args in
-	 let arg_names =
-	   List.map (fun v -> declare_typed_variable ~prefix:new_prefix v @@@ [time]) node.tn_input
-	 in
+     let f_args = List.map (expression_to_terms nodes prefix) args in
+     begin
+     try
+         let node = List.find (fun {tn_name={name=name'}} -> name = name') nodes in
+         let f_node_eqs = node_to_formulae nodes new_prefix node in
+         fun ~time ->
+             let args, arg_eqs = split (List.map (fun f -> f ~time:time) f_args) in
+             (* We crash if one of the arguments is a tuple, just in case *)
+             let args = List.map (function [arg] -> arg | _ -> failwith "Tuple in argument position") args in
+             let arg_names =
+               List.map (fun v -> declare_typed_variable ~prefix:new_prefix v @@@ [time]) node.tn_input
+             in
 
-	 let results =
-	   List.map (fun v -> declare_typed_variable ~prefix:new_prefix v @@@ [time]) node.tn_output
-	 in
+             let results =
+               List.map (fun v -> declare_typed_variable ~prefix:new_prefix v @@@ [time]) node.tn_output
+             in
 
-	 List.iter (fun v -> ignore (declare_typed_variable ~prefix:new_prefix v); ()) node.tn_local;
+             List.iter (fun v -> ignore (declare_typed_variable ~prefix:new_prefix v); ()) node.tn_local;
 
-	 let input_eqs = List.map2 (===) args arg_names in
-	 let node_eqs = node_to_formulae nodes new_prefix time node in
+             let input_eqs = List.map2 (===) args arg_names in
+             let node_eqs = f_node_eqs ~time in
 
-	 results, input_eqs @ node_eqs
-       with Not_found ->
-	    failwith ("No such node " ^ name)
+             results, input_eqs @ node_eqs
+     with Not_found ->
+        failwith ("No such node " ^ name)
      end
   | TE_prim ({name}, _) ->
      failwith ("What is prim " ^ name)
   | _ ->
      failwith "something went wrong"
 
-and equation_to_formulae nodes prefix time {teq_patt; teq_expr} =
-  let exprs, eqs = expression_to_terms nodes prefix time teq_expr in
-  List.map2 (fun {name} expr -> (prefix ^ name) @@@ [time] === expr)
-	    teq_patt.tpatt_desc
-	    exprs
-  @ eqs
+and equation_to_formulae nodes prefix {teq_patt; teq_expr} =
+  let f_exprs = expression_to_terms nodes prefix teq_expr in
+  fun ~time -> 
+      let exprs, eqs = f_exprs time in
+          List.map2 (fun {name} expr -> (prefix ^ name) @@@ [time] === expr)
+                teq_patt.tpatt_desc
+                exprs
+          @ eqs
 
-and node_to_formulae nodes prefix time {tn_equs} =
-  tn_equs
-  |> List.map (equation_to_formulae nodes prefix time)
-  |> List.concat
+and node_to_formulae nodes prefix {tn_equs} =
+    let f_equs = List.map (equation_to_formulae nodes prefix) tn_equs in
+    fun ~time ->
+        List.map (fun f -> f ~time:time) f_equs |> List.concat
 	    
 let declare_variables {tn_input; tn_output; tn_local; tn_equs} =
   let variables = tn_input @ tn_output @ tn_local in
@@ -311,69 +337,70 @@ let verify nodes ({tn_input; tn_output; tn_local; tn_equs} as node) =
     in
 
     let module Base_solver = Smt.Make(struct end) in begin
-	Format.printf "Asserting theory for base case\n";
-	for i = 0 to depth - 1 do
-	  let formulae = node_to_formulae nodes "" (t_int i) node in
-	  List.iter (fun f ->
-		     report "assume" f;
-		     Base_solver.assume ~id:(Remember.id_for f) f)
-		    formulae
-	done;
-	Base_solver.check ();
-	
-	Format.printf "Checking base case condition\n";
-	for i = 0 to depth - 1 do
-	  let equation = (variable @@@ [t_int i]) === T.t_true in
-	  report "check" equation;
-	  if not (Base_solver.entails ~id:(Remember.id_for equation) equation)
-	  then raise (Does_not_hold equation)
-	done;
-	print_endline "The base case holds!"
+        Format.printf "Asserting theory for base case\n";
+        let f_formulae = node_to_formulae nodes "" node in
+        for i = 0 to depth - 1 do
+          let formulae = f_formulae (t_int i) in
+          List.iter (fun f ->
+                 report "assume" f;
+                 Base_solver.assume ~id:(Remember.id_for f) f)
+                formulae
+        done;
+        Base_solver.check ();
+        
+        Format.printf "Checking base case condition\n";
+        for i = 0 to depth - 1 do
+          let equation = (variable @@@ [t_int i]) === T.t_true in
+          report "check" equation;
+          if not (Base_solver.entails ~id:(Remember.id_for equation) equation)
+          then raise (Does_not_hold equation)
+        done;
+        print_endline "The base case holds!"
     end;
 
     let module Inductive_solver = Smt.Make(struct end) in begin
-	let n = "n" in
-	declare n ~input:[] ~output:Type.type_int;
+        let n = fresh () in
+        declare n ~input:[] ~output:Type.type_int;
 
-	Format.printf "Asserting theory for inductive case\n";
-	for i = 0 to depth do
-	  let instant = (n @@@ []) -- t_int i in
-	  let formulae = node_to_formulae nodes "" instant node in
-	  List.iter (fun f ->
-		     report "assume" f;
-		     Inductive_solver.assume ~id:(Remember.id_for f) f)
-		    formulae;
+        Format.printf "Asserting theory for inductive case\n";
+        let f_formulae = node_to_formulae nodes "" node in
+        for i = 0 to depth do
+          let instant = (n @@@ []) -- t_int i in
+          let formulae = f_formulae instant in
+          List.iter (fun f ->
+                 report "assume" f;
+                 Inductive_solver.assume ~id:(Remember.id_for f) f)
+                formulae;
 
-	  if i < depth 
-      then Inductive_solver.assume ~id:(Remember.id_for (instant >>> t_int 0)) ( instant >>> t_int 0 );
+          if i < depth 
+          then Inductive_solver.assume ~id:(Remember.id_for (instant >>> t_int 0)) ( instant >>> t_int 0 );
 
-	  if i > 0
-	  then begin
-	      let equation = (variable @@@ [instant]) === T.t_true in
-	      Format.printf "ASSUMING INDUCTIVE HYPOTHESIS\n";
-	      report "assume" equation;
-	      Inductive_solver.assume ~id:(Remember.id_for equation) ((variable @@@ [instant]) === T.t_true);
-	    end
-	done;
-    try
-        Inductive_solver.check ();
-    with Smt.Unsat(ids) -> begin
-        Format.printf "Unsatisfiable hypotheses\n";
-        List.iter (fun id -> 
-            F.print Format.std_formatter (Remember.formula_of id);
-            print_newline ())
-        ids;
-        Format.printf "\n";
-        let _ = read_line () in
-        raise (Failure "Unsatisfiable hypotheses")
-    end;
+          if i > 0
+          then begin
+              let equation = (variable @@@ [instant]) === T.t_true in
+              Format.printf "ASSUMING INDUCTIVE HYPOTHESIS\n";
+              report "assume" equation;
+              Inductive_solver.assume ~id:(Remember.id_for equation) ((variable @@@ [instant]) === T.t_true);
+            end
+        done;
+        (try
+            Inductive_solver.check ();
+        with Smt.Unsat(ids) -> begin
+            Format.printf "Unsatisfiable hypotheses\n";
+            List.iter (fun id -> 
+                F.print Format.std_formatter (Remember.formula_of id);
+                print_newline ())
+            ids;
+            Format.printf "\n";
+            raise (Failure "Unsatisfiable hypotheses")
+        end);
 
-	Format.printf "Checking inductive case condition\n";
-	let formula = (variable @@@ [n @@@ []] === T.t_true) in
-	report "check" formula;
-	if not (Inductive_solver.entails ~id:0 ((variable @@@ [n @@@ []] === T.t_true)))
-	then raise (Does_not_hold formula);
-	print_endline "The inductive case holds!"
+        Format.printf "Checking inductive case condition\n";
+        let formula = (variable @@@ [n @@@ []] === T.t_true) in
+        report "check" formula;
+        if not (Inductive_solver.entails ~id:0 ((variable @@@ [n @@@ []] === T.t_true)))
+        then raise (Does_not_hold formula);
+        print_endline "The inductive case holds!"
     end;
 
     Holds
@@ -382,13 +409,15 @@ let verify nodes ({tn_input; tn_output; tn_local; tn_equs} as node) =
      Formula.print Format.err_formatter f;
      Format.fprintf Format.err_formatter "\n";
      Does_not_hold f
-  | Smt.Error(msg) ->
-     match msg with
-     | DuplicateTypeName n ->
-	failwith ("Duplicate type name " ^ (Hstring.view n))
-     | DuplicateSymb s ->
-	failwith ("Duplicate symbol " ^ (Hstring.view s))
-     | UnknownType t ->
-	failwith ("Unknown type " ^ (Hstring.view t))
-     | UnknownSymb s ->
-	failwith ("Unknown symbol " ^ (Hstring.view s))
+  | Smt.Error(DuplicateSymb _) ->
+          Format.printf "Lol duplicate";
+          failwith "lol"
+  | Smt.Error(UnknownSymb _) ->
+          Format.printf "Lol unknown";
+          failwith "lol"
+  | Smt.Error(UnknownType t) ->
+          Format.printf "Top kek %s" (Hstring.view t);
+          failwith "kek"
+  | Smt.Error(DuplicateTypeName t) ->
+          Format.printf "Top lel %s" (Hstring.view t);
+          failwith "lel"
