@@ -1,0 +1,139 @@
+
+\documentclass[11pt]{article}
+
+
+\usepackage{extramarks} % Required for headers and footers
+\usepackage[usenames,dvipsnames]{color} % Required for custom colors
+\usepackage{graphicx} % Required to insert images
+\usepackage{listings} % Required for insertion of code
+\usepackage{courier} % Required for the courier font
+
+%----------------------------------------------------------------------------------------
+%	DOCUMENT STRUCTURE COMMANDS
+%	Skip this unless you know what you're doing
+%----------------------------------------------------------------------------------------
+
+% Header and footer for when a page split occurs within a problem environment
+\newcommand{\enterProblemHeader}[1]{
+\nobreak\extramarks{#1}{#1 continued on next page\ldots}\nobreak
+\nobreak\extramarks{#1 (continued)}{#1 continued on next page\ldots}\nobreak
+}
+
+% Header and footer for when a page split occurs between problem environments
+\newcommand{\exitProblemHeader}[1]{
+\nobreak\extramarks{#1 (continued)}{#1 continued on next page\ldots}\nobreak
+\nobreak\extramarks{#1}{}\nobreak
+}
+
+\setcounter{secnumdepth}{0} % Removes default section numbers
+\newcounter{homeworkProblemCounter} % Creates a counter to keep track of the number of problems
+
+\newcommand{\homeworkProblemName}{}
+\newenvironment{homeworkProblem}[1][Problem \arabic{homeworkProblemCounter}]{ % Makes a new environment called homeworkProblem which takes 1 argument (custom name) but the default is "Problem #"
+\stepcounter{homeworkProblemCounter} % Increase counter for number of problems
+\renewcommand{\homeworkProblemName}{#1} % Assign \homeworkProblemName the name of the problem
+\section{\homeworkProblemName} % Make a section in the document with the custom problem count
+\enterProblemHeader{\homeworkProblemName} % Header and footer within the environment
+}{
+\exitProblemHeader{\homeworkProblemName} % Header and footer after the environment
+}
+
+\newcommand{\problemAnswer}[1]{ % Defines the problem answer command with the content as the only argument
+\noindent\framebox[\columnwidth][c]{\begin{minipage}{0.98\columnwidth}#1\end{minipage}} % Makes the box around the problem answer and puts the content inside
+}
+
+\newcommand{\homeworkSectionName}{}
+\newenvironment{homeworkSection}[1]{ % New environment for sections within homework problems, takes 1 argument - the name of the section
+\renewcommand{\homeworkSectionName}{#1} % Assign \homeworkSectionName to the name of the section from the environment argument
+\subsection{\homeworkSectionName} % Make a subsection with the custom name of the subsection
+\enterProblemHeader{\homeworkProblemName\ [\homeworkSectionName]} % Header and footer within the environment
+}{
+\enterProblemHeader{\homeworkProblemName} % Header and footer after the environment
+}
+
+%----------------------------------------------------------------------------------------
+%	NAME AND CLASS SECTION
+%----------------------------------------------------------------------------------------
+
+\newcommand{\hmwkTitle}{LMOCH: a model checker for Lustre} % Assignment title
+\newcommand{\hmwkDueDate}{Sunday, 14 December, 2014} % Due date
+\newcommand{\hmwkClass}{Synchronous Systems} % Course/class
+\newcommand{\hmwkAuthorName}{Mario ALVAREZ-PICALLO} % Your name
+
+%----------------------------------------------------------------------------------------
+%	TITLE PAGE
+%----------------------------------------------------------------------------------------
+
+\title{
+\textmd{\textbf{\hmwkTitle}}\\
+\normalsize\vspace{0.1in}\small{Due\ on\ \hmwkDueDate}\\
+}
+
+\author{\textbf{\hmwkAuthorName}}
+
+\setlength{\parskip}{5pt}
+
+\begin{document}
+
+\maketitle
+
+\section{1. Scope of the project}
+LMOCH is a model checker for simple Lustre programs by $k$-induction. Its purpose is to automatically
+check that a given Lustre node satisfies a certain predicate, given by the output of that node, which
+must be a boolean.
+
+This model checker works by translating the AST of a Lustre program into a set of
+logical formulae which represent the semantics of said node as a function of time. Said formulae are
+then fed into the SMT solver Alt-Ergo-Zero in order to determine if the desired predicate holds.
+
+\section{2. Structure of the model checker}
+The model checker LMOCH consists of two components: a translator and a verifier.
+
+The translator, implemented in the file 'src/translator.ml', is rather simple. At its core are two mutually
+recursive functions, 'expression\_to\_formula' and 'expression\_to\_term'. These functions convert a Lustre
+expression into an AEZ formula or term respectively, and a set of additional logical formulae that specify
+the behavior of generated auxiliary variables.
+
+The translation process, although relatively straightforward, is rather complete, and allows for the handling
+of calls to different nodes. This is done through embedding the equations for the called node into the 
+equationsof the caller node. For this process to be sound, it is necessary to ensure that if a node calls
+another
+node more than once, the variables introduced by the equations of the callee don't overlap with each other,
+while at the same time ensuring that calls are preserved through time, i.e. that the same call in different
+instants of time doesn't introduce new fresh variables for each instant. This has been the source of subtle bugs
+through development.
+
+After the Lustre program has been converted to a set of logical formulae parameterized by time, the verifier,
+defined in the file 'src/verifier.ml', runs a simple $k$-induction algorithm on the resulting formulae. This
+algorithm is rather simple: first, the verifier checks that the base case holds, i.e. that the node has the
+desired property in the first $k$ instants of time. If at this point AEZ finds a contradiction in the model,
+this means that the checked property does not hold.
+
+On the other hand, if the base case succeeds, the verifier proceeds to check the inductive step, by asserting
+the node equations and the desired property for all instants $n - 1 \dots n - k$ and from this attempts to infer
+the property for instant $k$. If the property holds, then the process concludes and the verifier reports success
+. However, if AEZ fails to prove the desired property, the verifier increments the depth $k$ of the induction
+process and starts from the base case again, until the depth $k$ excedes the bound specified by the user.
+
+As an optimization, the verifier implements the path compression strategy described in Hagen and Tinelli. 
+This optimization adds an extra assumption to the inductive step of the verification process, that asserts that
+the last $k$ steps taken by the node don't repeat the same state. The rationale behind this is that in order
+to prove the property it suffices to check all loop-free paths. Mechanically, this is implemented by asserting
+that for all $j < i \leq k$ there exists a certain variable $x$ belonging to the inputs or the internal
+variables of the node such that $x_i \neq x_j$. 
+
+\section{3. Limitations}
+One of the main limitations of LMOCH is inherited from the SMT solver: since AEZ is unable to handle 
+floating-point numbers, LMOCH is unable to perform verification on Lustre code that uses them. 
+
+A more fundamental limitation, however, is that LMOCH can only prove properties that are expressible in Lustre,
+which limits its usefulness to arithmetic or logical properties that depend only on the last $k$ steps of a 
+trace. It is therefore impossible to prove liveness properties using LMOCH. This, however, should not be a
+crippling limitation, since Lustre is commonly used in embedded, real-time control software, which usually
+requires safety properties, but not liveness ones.
+
+\section{4. Compilation details}
+The provided software has been compiled and tested on a \nobreak{Ubuntu 14.04 64 bits} laptop, using the standard
+OCaml compiler \nobreak{version 4.02.1, 64 bits.}
+
+\end{document}

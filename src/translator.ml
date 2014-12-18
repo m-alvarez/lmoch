@@ -185,37 +185,51 @@ let f_and formulae =
     | [f] -> f
     | l   -> F.make F.And l
 
-let rec expression_to_formula nodes prefix ({texpr_desc} as exp) ~time =
+let rec expression_to_formula nodes prefix ({texpr_desc} as exp) =
   match texpr_desc with
   | TE_const (Cbool b) ->
+     fun ~time ->
      f_bool b, []
   | TE_ident {name} ->
+     fun ~time ->
      ((prefix ^ name) @@@ [time]) === (t_bool true), []
   | TE_op (Op_if, [cond; thn; els]) ->
-     let cond, ec = expression_to_formula nodes prefix cond time in
-     let f1, e1 = expression_to_formula nodes prefix thn time in
-     let f2, e2 = expression_to_formula nodes prefix els time in
+     let f_cond = expression_to_formula nodes prefix cond in
+     let f_thn = expression_to_formula nodes prefix thn in
+     let f_els = expression_to_formula nodes prefix els in
+     fun ~time ->
+     let cond, ec = f_cond ~time in
+     let f1, e1 = f_thn ~time in
+     let f2, e2 = f_els ~time in
      (cond &&& f1) ||| ((!!cond) &&& f2), (ec @ e1 @ e2)
   | TE_op (op, exprs) when is_logic op ->
-     let exprs, eqs = split @@ List.map (expression_to_formula nodes prefix ~time:time) exprs in
+     let f_exprs = List.map (expression_to_formula nodes prefix) exprs in
+     fun ~time ->
+     let exprs, eqs = split @@ (List.map (fun f -> f ~time) f_exprs) in
      f_operation op exprs, List.concat eqs
   | TE_op (op, exprs) when is_comparison op ->
-     let exprs, eqs = split @@ List.map (expression_to_terms nodes prefix ~time:time) exprs in
+     let f_exprs = List.map (expression_to_terms nodes prefix) exprs in
+     fun ~time ->
+     let exprs, eqs = split @@ List.map (fun f -> f ~time) f_exprs in
      f_compare op (List.map List.hd exprs), List.concat eqs
   | TE_arrow (head, tail) ->
      let initials, body = collect_arrows exp in
+     let f_initials = List.map (fun exp -> expression_to_formula nodes prefix exp) initials in
+     fun ~time ->
      let equations = ref [] in
-     let conds = List.mapi (fun i expr ->
-         let f, eqs = expression_to_formula nodes prefix expr (t_int 0) in
+     let conds = List.mapi (fun i f_expr ->
+         let f, eqs = f_expr ~time:(t_int 0) in
          equations := eqs @ !equations;
          (time === (t_int i)) &&& f)
-         initials
+         f_initials
      in
      let body, eqs = expression_to_formula nodes prefix body time in
      f_or ((time >>> (t_int (List.length conds))) :: conds), eqs @ !equations
 
-  | TE_pre f ->
-     let f, fe = expression_to_formula nodes prefix f (time (*-- (t_int 1*)) in
+  | TE_pre expr ->
+     let f_expr = expression_to_formula nodes prefix expr in
+     fun ~time ->
+         let f, fe = f_expr ~time in
      (time >>> (t_int 0)) => f, fe
 
   | _ ->
